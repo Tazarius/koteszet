@@ -103,6 +103,10 @@ button,input,textarea,select{font:inherit;color:inherit}
 .st.working{background:var(--gilt);animation:pulse 1s infinite alternate}
 @keyframes pulse{to{opacity:.3}}
 .thumb.cover::after{content:"borító";position:absolute;top:4px;left:4px;font-size:10px;background:var(--accent);color:var(--accent-ink);padding:0 5px;border-radius:3px}
+.thumb .role{position:absolute;top:4px;left:4px;font-size:10px;background:var(--ink);color:var(--surface);padding:0 5px;border-radius:3px;opacity:.85}
+.thumb.r-image img,.thumb.r-pdfOnly img,.thumb.r-back img{opacity:.75}
+.st.img{background:var(--surface);border-color:var(--muted)}
+.rolesel{border:1px solid var(--line);background:var(--surface);border-radius:8px;padding:5px 8px;min-height:34px;font-size:14px}
 .addtile{aspect-ratio:3/4;border:1.5px dashed var(--line);border-radius:4px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;color:var(--muted);cursor:pointer;font-size:13px;text-align:center;padding:4px}
 .addtile:hover{border-color:var(--accent);color:var(--accent)}
 .addtile b{font-size:24px;font-weight:400;line-height:1}
@@ -183,6 +187,7 @@ details.more summary{cursor:pointer;color:var(--muted);font-size:14px}
 <script src="vendor/jszip.min.js"></script>
 <script src="vendor/jspdf.umd.min.js"></script>
 <script src="tess/tesseract.min.js"></script>
+<script src="clean.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

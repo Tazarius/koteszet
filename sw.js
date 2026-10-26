@@ -1,7 +1,7 @@
 // Kötészet – offline gyorsítótár. A VERSION változtatása új kiadást jelent.
-const VERSION = "koteszet-v1";
+const VERSION = "koteszet-v2";
 const FILES = [
-  "./", "index.html", "app.js", "manifest.webmanifest",
+  "./", "index.html", "clean.js", "app.js", "manifest.webmanifest",
   "vendor/jszip.min.js", "vendor/jspdf.umd.min.js",
   "tess/tesseract.min.js", "tess/worker.min.js",
   "tess/tesseract-core-lstm.wasm.js", "tess/tesseract-core-simd-lstm.wasm.js",
