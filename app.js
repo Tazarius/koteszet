@@ -138,6 +138,18 @@ function autoRole(b,p,r){ if(p.roleManual) return;
   p.role=/ISBN|ISSN|©|\bKIADÁS\b|\(c\)\s*\d{4}|Felelős (kiadó|szerkesztő)|Nyomda|\d példány/.test(r.text)?"pdfOnly"   // impresszum
     :(short||r.words<30)&&(titleHit||/KIADÓ/.test(r.text))?"pdfOnly"   // címlap (dedikálással is)
     :short?"image":"text"; }
+/* Kiolvasás két lépésben: először automatikus oldalfelbontással (képes oldalakon ez a jobb).
+   Ha az oldal sok darabra esett szét (árnyékos, ívelt lapnál a motor szövegrészeket képnek néz),
+   „egyetlen szövegtömb” módban is kiolvassa, és a több jó szót adó eredményt tartja meg. */
+const textBlocks=data=>(data.blocks||[]).filter(bl=>(bl.paragraphs||[]).some(pa=>(pa.lines||[]).some(ln=>(ln.words||[]).filter(x=>x.confidence>=75&&/\p{L}{2}/u.test(x.text)).length>=2))).length;
+async function readPage(w,blob){ const {data}=await w.recognize(blob,{}, {text:true,blocks:true}); let r=cleanOcr(data); const nb=textBlocks(data);
+  r.modes=`3:${r.words}/${nb}`;
+  if(nb>=3||r.frag){ try{ await w.setParameters({tessedit_pageseg_mode:"6"}); ocr.cur=0;
+      const d6=(await w.recognize(blob,{}, {text:true,blocks:true})).data; const r6=cleanOcr(d6); r6.modes=r.modes+` 6:${r6.words}`;
+      // szétesett oldalon a sima mód sorrendje és sorvégei megbízhatóbbak: akkor is azt vesszük, ha alig kevesebb szót ad
+      if(r6.words>=r.words*0.95){ r6.modes+=" *6"; r=r6; } else r.modes=r6.modes; }
+    finally{ await w.setParameters({tessedit_pageseg_mode:"3"}).catch(()=>{}); } }
+  return r; }
 async function runOcr(b,onlyIds){ if(ocr.running){ toast("Már fut egy kiolvasás."); return; }
   const cand=allPages(b).filter(p=>onlyIds?onlyIds.includes(p.id):(p.status!=="done"&&!noOcr(b,p)));
   const targets=[]; let missing=0; for(const p of cand){ if(await getImg(p.id)) targets.push(p); else missing++; }
@@ -146,8 +158,7 @@ async function runOcr(b,onlyIds){ if(ocr.running){ toast("Már fut egy kiolvasá
   let w; try{ setOcrText("Olvasómotor betöltése…"); w=await getWorker(); }
   catch(e){ console.error(e); ocr.running=false; worker=null; busy(false); render(); toast("Nem sikerült elindítani a szövegfelismerést. Ellenőrizd az internetkapcsolatot (az első indításhoz kell), és próbáld újra.",7000); return; }
   for(const p of targets){ if(ocr.stop) break; p.status="working"; ocr.cur=0; paintThumb(p); paintOcr();
-    try{ const blob=await getImg(p.id); const {data}=await w.recognize(blob,{}, {text:true,blocks:true});
-      const r=cleanOcr(data); p.text=r.text; p.lines=r.lines; p.edited=false; p.conf=r.words?r.conf:null; p.doubt=!!r.frag; p.status="done"; autoRole(b,p,r);
+    try{ const blob=await getImg(p.id); const r=await readPage(w,blob); p.text=r.text; p.lines=r.lines; p.edited=false; p.conf=r.words?r.conf:null; p.doubt=!!r.frag; p.ocrModes=r.modes; p.status="done"; autoRole(b,p,r);
       if(!p.w){ const bmp=await decode(blob); p.w=bmp.width; p.h=bmp.height; } }
     catch(e){ console.error(e); p.status="error"; }
     ocr.done++; save(b); paintThumb(p); paintOcr(); if(S.edit&&S.edit.pageId===p.id) renderEditor(); }

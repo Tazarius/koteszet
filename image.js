@@ -120,25 +120,41 @@ function warp(src,quad,maxSide){ const W=src.width, H=src.height; const P=quad.m
    majd a papírt közel fehérre, a festéket sötétebbre húzza. A színek megmaradnak. */
 function whiten(c){ const w=c.width, h=c.height, x=ctx2d(c), im=x.getImageData(0,0,w,h), d=im.data;
   const S=16, bw=Math.ceil(w/S), bh=Math.ceil(h/S), g=grayOf(im);
-  // blokkonként a világos (papír) szint: a blokk 90. percentilise
-  const bgs=new Float32Array(bw*bh);
-  for(let by=0;by<bh;by++) for(let bx=0;bx<bw;bx++){ const v=[];
-    for(let y=by*S;y<Math.min(h,by*S+S);y+=2) for(let xx=bx*S;xx<Math.min(w,bx*S+S);xx+=2) v.push(g[y*w+xx]);
-    v.sort((a,b)=>a-b); bgs[by*bw+bx]=v[Math.floor(v.length*0.9)]||255; }
-  const paper=median(bgs);
-  // a sötét (rajz, fekete borító) blokkok nem húzhatják le a térképet: helyettük a papírszint
-  for(let i=0;i<bgs.length;i++) if(bgs[i]<paper*0.75) bgs[i]=paper;
-  const sm=boxBlur(boxBlur(bgs,bw,bh,2),bw,bh,2);
-  const T=248;
-  // fekete pont: a sötét pixelek alsó része
-  const hs=new Uint32Array(256); for(let i=0;i<g.length;i+=3) hs[clamp(g[i]|0,0,255)]++;
-  let acc=0, black=0; const tot=Math.ceil(g.length/3); for(;black<255;black++){ acc+=hs[black]; if(acc>tot*0.005) break; }
-  black=Math.min(black,90);
-  for(let y=0;y<h;y++){ const fy=clamp((y+0.5)/S-0.5,0,bh-1), y0=Math.floor(fy), y1=Math.min(bh-1,y0+1), ty=fy-y0;
-    for(let xx=0;xx<w;xx++){ const fx=clamp((xx+0.5)/S-0.5,0,bw-1), x0=Math.floor(fx), x1=Math.min(bw-1,x0+1), tx=fx-x0;
-      const bg=(sm[y0*bw+x0]*(1-tx)+sm[y0*bw+x1]*tx)*(1-ty)+(sm[y1*bw+x0]*(1-tx)+sm[y1*bw+x1]*tx)*ty;
-      const gain=clamp(paper/Math.max(1,bg),0.85,1.5), o=(y*w+xx)*4;
-      for(let k=0;k<3;k++){ let v=d[o+k]*gain; v=(v-black)*T/Math.max(1,paper-black); d[o+k]=clamp(v,0,255); } } }
+  // blokkonként a papír fényessége (95. percentilis) és a színesség
+  const bgs=new Float32Array(bw*bh), sat=new Float32Array(bw*bh);
+  for(let by=0;by<bh;by++) for(let bx=0;bx<bw;bx++){ const v=[], sv=[];
+    for(let y=by*S;y<Math.min(h,by*S+S);y+=2) for(let xx=bx*S;xx<Math.min(w,bx*S+S);xx+=2){ const p=y*w+xx, o=p*4; v.push(g[p]);
+      sv.push(Math.max(d[o],d[o+1],d[o+2])-Math.min(d[o],d[o+1],d[o+2])); }
+    v.sort((a,b)=>a-b); sv.sort((a,b)=>a-b); bgs[by*bw+bx]=v[Math.floor(v.length*0.95)]||255; sat[by*bw+bx]=sv[sv.length>>1]||0; }
+  const paper=median(bgs), paperSat=median(sat);
+  // színes rajz: nem papír, ott a szomszédos papírból becsülünk. Az árnyék szürke és fokozatos, az megmarad
+  // a térképben, így kiegyenlítődik (korábban a sötét foltokat rajznak vettük, és pont az árnyék maradt meg).
+  let val=new Float32Array(bw*bh), ok=new Uint8Array(bw*bh);
+  for(let i=0;i<bgs.length;i++){ ok[i]=sat[i]<=paperSat+35&&bgs[i]>paper*0.25?1:0; val[i]=bgs[i]; }
+  // kis sötét foltok (szöveg, vonalas rajz) kitöltése: 2 blokkos maximumszűrő az érvényes blokkokon
+  const dil=new Float32Array(bw*bh), dok=new Uint8Array(bw*bh);
+  for(let by=0;by<bh;by++) for(let bx=0;bx<bw;bx++){ let m=-1;
+    for(let yy=Math.max(0,by-2);yy<=Math.min(bh-1,by+2);yy++) for(let xx=Math.max(0,bx-2);xx<=Math.min(bw-1,bx+2);xx++){ const k=yy*bw+xx; if(ok[k]&&val[k]>m) m=val[k]; }
+    if(m>=0){ dil[by*bw+bx]=m; dok[by*bw+bx]=1; } }
+  val=dil; ok=dok;
+  // a megmaradt lyukak (nagy színes kép) kitöltése a szomszédokból
+  for(let it=0;it<Math.max(bw,bh)&&ok.includes(0);it++){ const nv=val.slice(), no=ok.slice();
+    for(let by=0;by<bh;by++) for(let bx=0;bx<bw;bx++){ const k=by*bw+bx; if(ok[k]) continue; let s=0,n=0;
+      for(const [dx,dy] of [[1,0],[-1,0],[0,1],[0,-1]]){ const X=bx+dx, Y=by+dy; if(X<0||Y<0||X>=bw||Y>=bh) continue; const q=Y*bw+X; if(ok[q]){ s+=val[q]; n++; } }
+      if(n){ nv[k]=s/n; no[k]=1; } }
+    val=nv; ok=no; }
+  for(let i=0;i<val.length;i++) if(!ok[i]) val[i]=paper;
+  const sm=boxBlur(boxBlur(val,bw,bh,1),bw,bh,1);
+  const T=248, bgAt=(xx,y)=>{ const fy=clamp((y+0.5)/S-0.5,0,bh-1), y0=Math.floor(fy), y1=Math.min(bh-1,y0+1), ty=fy-y0;
+    const fx=clamp((xx+0.5)/S-0.5,0,bw-1), x0=Math.floor(fx), x1=Math.min(bw-1,x0+1), tx=fx-x0;
+    return (sm[y0*bw+x0]*(1-tx)+sm[y0*bw+x1]*tx)*(1-ty)+(sm[y1*bw+x0]*(1-tx)+sm[y1*bw+x1]*tx)*ty; };
+  // 1. lépés: minden pixelt a helyi papírszinthez mérünk (árnyék ki), 2. lépés: fekete- és fehérpont
+  const gainMap=new Float32Array(w*h);
+  for(let y=0;y<h;y++) for(let xx=0;xx<w;xx++) gainMap[y*w+xx]=clamp(T/Math.max(1,bgAt(xx,y)),0.8,4);
+  const hs=new Uint32Array(256); let tot=0; for(let i=0;i<g.length;i+=3){ hs[clamp(g[i]*gainMap[i]|0,0,255)]++; tot++; }
+  let acc=0, black=0; for(;black<255;black++){ acc+=hs[black]; if(acc>tot*0.005) break; } black=Math.min(black,110);
+  for(let p=0;p<w*h;p++){ const o=p*4, gn=gainMap[p];
+    for(let k=0;k<3;k++){ const v=d[o+k]*gn; d[o+k]=clamp((v-black)*T/Math.max(1,T-black),0,255); } }
   x.putImageData(im,0,0); return c; }
 
 /* Élesség: a legerősebb élek átlagos Laplace-értéke (szövegnél a betűszélek) ~1000 px szélesen */
