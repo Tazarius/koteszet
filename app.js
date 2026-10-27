@@ -7,6 +7,7 @@ const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&
 const withTimeout=(p,ms)=>Promise.race([p,new Promise((_,r)=>setTimeout(()=>r(new Error("időtúllépés")),ms))]);
 const BASE=document.baseURI;
 const LOW_CONF=80;
+const APP_VERSION="v6";   // az sw.js VERSION értékével együtt emelendő
 const ROLES={text:"Szöveg",image:"Csak kép",pdfOnly:"Csak PDF",back:"Hátlap, fül"};
 
 /* ---------- tárolás ---------- */
@@ -382,7 +383,8 @@ function render(){ const app=$("#app"); const b=book();
       <li><b>3</b><div><h3>Kész: PDF és EPUB</h3><p>Képes, kereshető PDF és EPUB készül, ezeket a Drive-ra mented, utána a képek törölhetők.</p></div></li></ol>
       <div class="row"><button class="btn" data-act="sample">Próbakönyv betöltése</button><span class="note">Két generált oldal a kipróbáláshoz.</span></div></section>`}
     <div class="row" style="border-top:1px solid var(--line);padding-top:16px"><label class="btn small" style="position:relative">Mentett könyv betöltése (.zip)<input type="file" id="importZip" accept=".zip,application/zip" style="position:absolute;inset:0;width:100%;height:100%;opacity:0;font-size:0"></label>
-      ${lib.length?`<button class="btn small ghost" data-act="sample">Próbakönyv</button>`:""}<span class="note" id="usage"></span></div>`;
+      ${lib.length?`<button class="btn small ghost" data-act="sample">Próbakönyv</button>`:""}<span class="note" id="usage"></span></div>
+    <p class="note" style="text-align:center">Kötészet ${APP_VERSION}</p>`;
     try{ navigator.storage.estimate().then(e=>{ const el=$("#usage"); if(el&&e.usage!=null) el.textContent=`Foglalt hely a telefonon: kb. ${Math.round(e.usage/1048576)} MB`; }).catch(()=>{}); }catch{}
     return; }
   if(S.view==="finish") return renderFinish(b);
@@ -615,6 +617,8 @@ if("serviceWorker" in navigator){
     if(reg.waiting) mark(reg.waiting);
     reg.addEventListener("updatefound",()=>{ const w=reg.installing; if(w) w.addEventListener("statechange",()=>{ if(w.state==="installed") mark(w); }); });
     setInterval(()=>reg.update().catch(()=>{}),60*60*1000);
+    // a telepített app sokáig a háttérben marad: előtérbe hozáskor is nézzünk frissítést
+    document.addEventListener("visibilitychange",()=>{ if(document.visibilityState==="visible") reg.update().catch(()=>{}); });
   }).catch(e=>console.warn("SW",e));
   navigator.serviceWorker.addEventListener("controllerchange",()=>{ if(reloading) location.reload(); });
 }
