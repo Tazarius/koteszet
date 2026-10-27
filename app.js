@@ -39,7 +39,9 @@ const allPages=b=>b.chapters.flatMap(c=>c.pages);
 const noOcr=(b,p)=>p.id===b.cover||(p.role==="image"&&p.roleManual);
 const pending=b=>allPages(b).filter(p=>p.status!=="done"&&!noOcr(b,p)).length;
 const roleOf=(b,p)=>p.id===b.cover?"cover":(p.role||"text");
-const DEF_OPTS={hyphen:true,reflow:true,dropNums:true,dashes:true,dropHeads:true,blurb:true};
+const DEF_OPTS={hyphen:true,reflow:true,dropNums:true,dashes:true,dropHeads:true,blurb:true,enhance:true};
+/* az eredeti fotó külön kulcson marad meg a lezárásig */
+const OID=id=>"o_"+id;
 function newBook(title,author){ return {id:uid(),uuid:(crypto.randomUUID?crypto.randomUUID():uid()+uid()),title:title||"Névtelen könyv",author:author||"",
   cover:null,coverData:null,status:"active",saved:{},opts:{...DEF_OPTS},chapters:[{id:uid(),title:"1. fejezet",pages:[]}],created:Date.now(),updated:Date.now()}; }
 function fixBook(b){ b.status=b.status||"active"; b.saved=b.saved||{}; b.opts=Object.assign({...DEF_OPTS},b.opts||{});
@@ -64,8 +66,26 @@ function toBlob(c,q=0.88){ return new Promise(r=>c.toBlob(r,"image/jpeg",q)); }
 async function scaleTo(blob,max,q){ const bmp=await decode(blob); const k=Math.min(1,max/Math.max(bmp.width,bmp.height));
   const c=document.createElement("canvas"); c.width=Math.round(bmp.width*k); c.height=Math.round(bmp.height*k);
   c.getContext("2d").drawImage(bmp,0,0,c.width,c.height); const out=await toBlob(c,q); if(bmp.close) bmp.close(); return {blob:out,w:c.width,h:c.height}; }
-async function rotateImage(id){ const bmp=await decode(await getImg(id)); const c=document.createElement("canvas"); c.width=bmp.height; c.height=bmp.width;
+async function rotateImage(id){ const src=await getImg(id); if(!src) return null; const bmp=await decode(src); const c=document.createElement("canvas"); c.width=bmp.height; c.height=bmp.width;
   const x=c.getContext("2d"); x.translate(c.width,0); x.rotate(Math.PI/2); x.drawImage(bmp,0,0); await putImg(id,await toBlob(c)); dropUrl(id); return {w:c.width,h:c.height}; }
+/* oldal forgatása: a javított kép, az eredeti és a sarkok együtt fordulnak (90° jobbra) */
+async function rotatePage(p){ const d=await rotateImage(p.id); await rotateImage(OID(p.id));
+  if(p.quad) p.quad=[p.quad[3],p.quad[0],p.quad[1],p.quad[2]].map(([x,y])=>[1-y,x]); return d; }
+async function delPage(p){ await delImg(p.id); await delImg(OID(p.id)); }
+
+/* ---------- képjavítás ---------- */
+const BLUR_LIM=80, GLARE_LIM=0.02;
+/* quad: undefined = automatikus lapkeresés, null = nincs vágás, tömb = kézi sarkok */
+async function processPage(p,quad){ const ob=await getImg(OID(p.id))||await getImg(p.id); if(!ob) throw new Error("hiányzik a kép");
+  const bmp=await decode(ob); const r=KImage.enhance(bmp,quad===undefined?{}:{quad}); if(bmp.close) bmp.close();
+  if(!await getImg(OID(p.id))) await putImg(OID(p.id),ob);
+  await putImg(p.id,await toBlob(r.canvas,0.88)); dropUrl(p.id);
+  Object.assign(p,{w:r.canvas.width,h:r.canvas.height,quad:r.quad,enh:true,sharp:Math.round(r.sharp),glare:+r.glare.toFixed(4),lines:null,
+    warn:r.sharp<BLUR_LIM?"blur":r.glare>GLARE_LIM?"glare":null});
+  r.canvas.width=r.canvas.height=0; return p; }
+async function restoreOriginal(p){ const ob=await getImg(OID(p.id)); if(!ob) return false; await putImg(p.id,ob); dropUrl(p.id);
+  const bmp=await decode(ob); Object.assign(p,{w:bmp.width,h:bmp.height,quad:null,enh:false,warn:null,lines:null}); if(bmp.close) bmp.close(); return true; }
+const WARN_TEXT={blur:"Homályosnak tűnik, érdemes újrafotózni.",glare:"Csillogó, kiégett folt van rajta, érdemes más szögből újrafotózni."};
 function dataUrlToBlob(d){ const [h,b64]=d.split(","); const bin=atob(b64); const u=new Uint8Array(bin.length); for(let i=0;i<bin.length;i++) u[i]=bin.charCodeAt(i);
   return new Blob([u],{type:(h.match(/data:([^;]+)/)||[])[1]||"image/jpeg"}); }
 function blobToDataUrl(b){ return new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(r.result); r.onerror=()=>rej(r.error); r.readAsDataURL(b); }); }
@@ -78,12 +98,22 @@ async function addFiles(b,chId,files){ const ch=b.chapters.find(c=>c.id===chId);
   let ok=0, err=""; busy(true);
   for(let i=0;i<list.length;i++){ const f=list[i]; if(list.length>1) toast(`${i+1}/${list.length}. kép előkészítése…`,60000);
     try{ const r=await withTimeout(scaleTo(f,2400,0.88),60000); const id=uid(); await putImg(id,r.blob);
-      ch.pages.push({id,text:"",status:"new",conf:null,w:r.w,h:r.h,lines:null,edited:false,role:"text"}); ok++; }
+      const p={id,text:"",status:"new",conf:null,w:r.w,h:r.h,lines:null,edited:false,role:"text"};
+      if(b.opts.enhance){ await putImg(OID(id),r.blob); try{ await withTimeout(processPage(p),60000); }catch(e){ console.warn("képjavítás",e); } }
+      ch.pages.push(p); ok++; }
     catch(e){ console.error(e); if(!err) err=(e&&e.message)||String(e); } }
   busy(false);
   if(b.status==="done") b.status="active";
   save(b,true); render();
-  toast(ok===list.length?`${ok} oldal hozzáadva.`:`${ok} oldal hozzáadva, ${list.length-ok} képet nem tudtam megnyitni (${err}).`,7000); }
+  const bad=ch.pages.map((p,i)=>p.warn&&!p.warnSeen?i+1:0).filter(Boolean); ch.pages.forEach(p=>p.warnSeen=true);
+  toast((ok===list.length?`${ok} oldal hozzáadva.`:`${ok} oldal hozzáadva, ${list.length-ok} képet nem tudtam megnyitni (${err}).`)
+    +(bad.length?` Gyenge fotó (homályos vagy csillogó): ${bad.join(", ")}. oldal, érdemes újrafotózni.`:""),bad.length?10000:7000); }
+/* egy oldal fotójának cseréje (újrafotózás), a helye és a fejezete marad */
+async function replacePhoto(b,p,file){ busy(true); try{ const r=await withTimeout(scaleTo(file,2400,0.88),60000);
+  await putImg(p.id,r.blob); await delImg(OID(p.id)); Object.assign(p,{text:"",status:"new",conf:null,w:r.w,h:r.h,lines:null,edited:false,quad:null,enh:false,warn:null,doubt:false});
+  if(!p.roleManual) p.role="text";
+  if(b.opts.enhance){ await putImg(OID(p.id),r.blob); try{ await withTimeout(processPage(p),60000); }catch(e){ console.warn(e); } }
+  dropUrl(p.id); save(b,true); toast(p.warn?"Kicserélve, de ez a fotó is gyengének tűnik.":"Kicserélve. Most kiolvashatod az oldalt."); } finally{ busy(false); } }
 
 /* ---------- szövegfelismerés ---------- */
 let worker=null, ocr={running:false,stop:false,done:0,total:0,cur:0,bookId:null};
@@ -91,6 +121,8 @@ async function getWorker(){ if(worker) return worker;
   worker=await Tesseract.createWorker("hun",1,{workerPath:new URL("tess/worker.min.js",BASE).href,corePath:new URL("tess/",BASE).href,
     langPath:new URL("lang",BASE).href,workerBlobURL:false,gzip:true,cacheMethod:"none",
     logger:m=>{ if(m.status==="recognizing text"){ocr.cur=m.progress||0; paintOcr();} else if(ocr.running&&!ocr.done){ setOcrText(loadingText(m)); } }});
+  // automatikus oldalfelbontás (a rajzok melletti szöveghasábokat így jobban külön veszi)
+  try{ await worker.setParameters({tessedit_pageseg_mode:"3"}); }catch(e){ console.warn(e); }
   return worker; }
 function loadingText(m){ const map={"loading tesseract core":"Olvasómotor betöltése","initializing tesseract":"Olvasómotor indítása","loading language traineddata":"Magyar nyelvi adat betöltése","initializing api":"Előkészítés"};
   return (map[m.status]||"Előkészítés")+(m.progress?` · ${Math.round(m.progress*100)}%`:""); }
@@ -104,7 +136,7 @@ function autoRole(b,p,r){ if(p.roleManual) return;
   const low=s=>s.toLocaleLowerCase("hu");
   const titleHit=idx<Math.max(4,pages.length*0.1)&&low(b.title||"").split(/\s+/).filter(w=>w.length>=5).some(w=>low(r.text).includes(w));
   p.role=/ISBN|ISSN|©|\bKIADÁS\b|\(c\)\s*\d{4}|Felelős (kiadó|szerkesztő)|Nyomda|\d példány/.test(r.text)?"pdfOnly"   // impresszum
-    :short&&(titleHit||/KIADÓ/.test(r.text))?"pdfOnly"                // címlap
+    :(short||r.words<30)&&(titleHit||/KIADÓ/.test(r.text))?"pdfOnly"   // címlap (dedikálással is)
     :short?"image":"text"; }
 async function runOcr(b,onlyIds){ if(ocr.running){ toast("Már fut egy kiolvasás."); return; }
   const cand=allPages(b).filter(p=>onlyIds?onlyIds.includes(p.id):(p.status!=="done"&&!noOcr(b,p)));
@@ -140,14 +172,15 @@ function bookContent(b){ const o=b.opts;
   const txt=p=>dropRepeated((p.text||"").replace(/\r/g,""),rep).trim();
   const toItems=s=>{ const items=[]; for(const para of paragraphs(s,o)){ const ids=[];
       const clean=para.replace(MK,(_,id)=>{ids.push(id);return "";}).trim(); if(clean) items.push({p:clean}); ids.forEach(id=>items.push({img:id})); } return items; };
-  const out=b.chapters.map((c,i)=>{ let s="", pend=[];
+  const out=b.chapters.map((c,i)=>{ let s="", pend=[], lead=[];
     for(const p of c.pages){ const r=roleOf(b,p);
       if(r==="image"){ pend.push(p.id); continue; } if(r!=="text") continue;
       let t=txt(p); if(!t) continue;
+      if(pend.length&&!s){ lead.push(...pend); pend=[]; }   // a fejezet eleji képek a szöveg elé
       if(pend.length){ const mk=pend.map(id=>`\uE000${id}\uE001`).join(""); pend=[]; const k=t.indexOf("\n\n"); t=k<0?t+" "+mk:t.slice(0,k)+" "+mk+t.slice(k); }
       s=joinTwo(s,t); }
     if(pend.length) s+=(s?" ":"")+pend.map(id=>`\uE000${id}\uE001`).join("");
-    return {title:c.title.trim()||`${i+1}. fejezet`,items:toItems(s)}; });
+    return {title:c.title.trim()||`${i+1}. fejezet`,items:[...lead.map(id=>({img:id})),...toItems(s)]}; });
   if(o.blurb){ const back=allPages(b).filter(p=>roleOf(b,p)==="back").map(txt).filter(Boolean);
     if(back.length) out.push({title:"Fülszöveg",items:toItems(back.join("\n\n"))}); }
   for(const c of out) c.paras=c.items.filter(x=>x.p).map(x=>x.p);
@@ -244,7 +277,7 @@ function buildTxt(b){ const chs=bookContent(b); if(!chs.length) throw new Error(
   return new Blob([[b.title,b.author].filter(Boolean).join("\n")+"\n\n\n"+chs.map(c=>c.title+"\n\n"+c.paras.join("\n\n")).join("\n\n\n")+"\n"],{type:"text/plain"}); }
 
 /* ---------- mentés a telefonra / megosztás (Drive) ---------- */
-const MIME={pdf:"application/pdf",epub:"application/epub+zip",txt:"text/plain",zip:"application/zip"};
+const MIME={pdf:"application/pdf",epub:"application/epub+zip",txt:"text/plain",zip:"application/zip",md:"text/markdown"};
 function download(name,blob){ const a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download=name; document.body.append(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(a.href),20000); }
 async function deliver(name,blob,how){ const ext=name.split(".").pop(); const file=new File([blob],name,{type:MIME[ext]||blob.type||"application/octet-stream"});
   if(how!=="download"&&navigator.canShare){ try{ if(navigator.canShare({files:[file]})){ await navigator.share({files:[file],title:name}); return "shared"; } }catch(e){ if(e&&e.name==="AbortError") return "cancel"; } }
@@ -255,12 +288,29 @@ function deliveredMsg(r,name){ return r==="shared"?`Megosztva: ${name}`:r==="dow
 async function buildBackup(b){ const z=new JSZip(); const copy=JSON.parse(JSON.stringify(b));
   const cb=await coverBlob(b); if(cb&&!copy.coverData){ try{ copy.coverData=await blobToDataUrl((await scaleTo(cb,900,0.8)).blob); }catch{} }
   z.file("koteszet.json",JSON.stringify({format:"koteszet",version:1,book:copy}));
-  for(const p of allPages(b)){ const blob=await getImg(p.id); if(blob) z.file(`kepek/${p.id}.jpg`,blob); }
+  for(const p of allPages(b)){ const blob=await getImg(p.id); if(blob) z.file(`kepek/${p.id}.jpg`,blob); const o=await getImg(OID(p.id)); if(o) z.file(`kepek/o_${p.id}.jpg`,o); }
   return z.generateAsync({type:"blob",compression:"STORE"}); }
+/* Projektcsomag: a javított, tömörített oldalképek + a szöveg Markdownban + a beállítások.
+   Visszatölthető a „Mentett könyv betöltése” gombbal; ebből minden kimenet újra elkészíthető. */
+async function buildPackage(b,onProg){ const z=new JSZip(); const copy=JSON.parse(JSON.stringify(b)); const pages=allPages(b); let missing=0;
+  for(const p of allPages(copy)){ delete p.warnSeen; }
+  const cb=await coverBlob(b); if(cb&&!copy.coverData){ try{ copy.coverData=await blobToDataUrl((await scaleTo(cb,900,0.8)).blob); }catch{} }
+  for(let i=0;i<pages.length;i++){ const p=pages[i]; onProg&&onProg(i,pages.length); const blob=await getImg(p.id); if(!blob){ missing++; continue; }
+    const img=await pdfImage(blob,roleOf(b,p)); z.file(`kepek/${p.id}.jpg`,img.blob);
+    const cp=allPages(copy).find(x=>x.id===p.id); if(cp){ const k=img.w/(p.w||img.w); if(cp.lines&&k!==1) cp.lines=cp.lines.map(l=>({t:l.t,x0:l.x0*k,y0:l.y0*k,x1:l.x1*k,y1:l.y1*k})); cp.w=img.w; cp.h=img.h; } }
+  z.file("koteszet.json",JSON.stringify({format:"koteszet",version:2,kind:"projektcsomag",created:new Date().toISOString(),book:copy}));
+  z.file("szoveg.md",buildMd(b));
+  z.file("OLVASSEL.txt","Kötészet projektcsomag: "+b.title+"\n\nkoteszet.json – a könyv adatai és beállításai\nkepek/ – a javított oldalképek\nszoveg.md – a teljes szöveg Markdownban\n\nVisszatöltés: Kötészet → Mentett könyv betöltése (.zip).\n");
+  return {blob:await z.generateAsync({type:"blob",compression:"STORE"}),missing}; }
+function buildMd(b){ const chs=bookContent(b); const out=[`# ${b.title}`]; if(b.author) out.push(`*${b.author}*`);
+  for(const c of chs){ out.push(`## ${c.title}`); for(const it of c.items) out.push(it.p!=null?it.p.replace(/^([#>*+-]|\d+\.)\s/,"\\$1 "):`![](kepek/${it.img}.jpg)`); }
+  return out.join("\n\n")+"\n"; }
 async function importBackup(file){ const z=await JSZip.loadAsync(file); const j=z.file("koteszet.json")||z.file("lapolvaso.json"); if(!j) throw new Error("nem mentés");
   const b=JSON.parse(await j.async("string")).book; const remap={};
   b.id=uid(); for(const c of b.chapters){ c.id=uid(); for(const p of c.pages){ const nid=uid(); remap[p.id]=nid;
-    const f=z.file(`kepek/${p.id}.jpg`); if(f) await putImg(nid,new Blob([await f.async("arraybuffer")],{type:"image/jpeg"})); p.id=nid; delete p.k; } }
+    const f=z.file(`kepek/${p.id}.jpg`); if(f) await putImg(nid,new Blob([await f.async("arraybuffer")],{type:"image/jpeg"}));
+    const o=z.file(`kepek/o_${p.id}.jpg`); if(o) await putImg(OID(nid),new Blob([await o.async("arraybuffer")],{type:"image/jpeg"}));
+    p.id=nid; delete p.k; } }
   b.cover=b.cover?remap[b.cover]||null:null; fixBook(b);
   if(S.books.some(x=>x.title===b.title)) b.title+=" (betöltött)";
   S.books.push(b); await save(b,true); return b; }
@@ -346,7 +396,7 @@ function render(){ const app=$("#app"); const b=book();
       <button class="btn ghost small" data-act="chDown" data-id="${c.id}" ${ci<b.chapters.length-1?"":"disabled"} aria-label="Fejezet lejjebb">↓</button>
       <button class="btn ghost small danger" data-act="chDel" data-id="${c.id}">Törlés</button></div>
     <div class="pages">${c.pages.map((p,pi)=>{ const r=roleOf(b,p); return `<button class="thumb${r==="cover"?" cover":""} r-${r}" data-act="edit" data-ch="${c.id}" data-page="${p.id}" title="${statusLabel(p)}">
-      <img data-img="${p.id}" alt="${pi+1}. oldal"><span class="n mono">${pi+1}</span><span class="st ${statusClass(p)}"></span>${ROLE_BADGE[r]?`<span class="role">${ROLE_BADGE[r]}</span>`:""}</button>`; }).join("")}</div>
+      <img data-img="${p.id}" alt="${pi+1}. oldal"><span class="n mono">${pi+1}</span><span class="st ${statusClass(p)}"></span>${ROLE_BADGE[r]?`<span class="role">${ROLE_BADGE[r]}</span>`:""}${p.warn?`<span class="pwarn" title="${esc(WARN_TEXT[p.warn])}">!</span>`:""}</button>`; }).join("")}</div>
     <div class="addrow"><label class="addbtn">📷 Fotózás<input type="file" accept="image/*" capture="environment" data-add="${c.id}"></label>
       <label class="addbtn">＋ Képek a galériából<input type="file" accept="image/*" multiple data-add="${c.id}"></label></div>
   </section>`).join("")}
@@ -354,7 +404,7 @@ function render(){ const app=$("#app"); const b=book();
   <section class="export">
     <h2 style="font-size:20px">${isDone?"Fájlok újra":"Kész a könyv?"}</h2>
     ${isDone?`<p class="note">A képek törölve, a szöveg megmaradt. Az EPUB és a szöveges fájlok bármikor újra elkészíthetők. Új oldal feltöltésével a könyv újra „Folyamatban” lesz.</p>
-      <div class="row"><button class="btn primary" data-act="mk" data-kind="epub">EPUB</button><button class="btn" data-act="mk" data-kind="tpdf">Szöveges PDF</button><button class="btn" data-act="mk" data-kind="txt">TXT</button></div>`
+      <div class="row"><button class="btn primary" data-act="mk" data-kind="epub">EPUB</button><button class="btn" data-act="mk" data-kind="tpdf">Szöveges PDF</button><button class="btn" data-act="mk" data-kind="txt">TXT</button><button class="btn" data-act="mk" data-kind="md">Markdown</button></div>`
     :`<p class="note">Ha minden oldal megvan és ki van olvasva, itt készül el a képes PDF és az EPUB. A mentésük után törölheted a képeket.</p>
       <div class="row"><button class="btn primary" data-act="toFinish">Tovább a befejezéshez</button></div>`}
     <details class="more"><summary>Beállítások és egyéb</summary><div style="display:flex;flex-direction:column;gap:14px;padding-top:12px">
@@ -364,9 +414,11 @@ function render(){ const app=$("#app"); const b=book();
       <label><input type="checkbox" data-opt="dropNums" ${b.opts.dropNums?"checked":""}><span>Oldalszámok kihagyása<small>A csak számot tartalmazó sorokat elhagyja</small></span></label>
       <label><input type="checkbox" data-opt="dropHeads" ${b.opts.dropHeads?"checked":""}><span>Élőfej és élőláb kihagyása<small>Az oldalak tetején/alján sok oldalon ismétlődő sor (pl. a könyv vagy fejezet címe)</small></span></label>
       <label><input type="checkbox" data-opt="dashes" ${b.opts.dashes?"checked":""}><span>Párbeszédjel javítása<small>A sor eleji kötőjelből (-) gondolatjel (–) lesz</small></span></label>
+      <label><input type="checkbox" data-opt="enhance" ${b.opts.enhance?"checked":""}><span>Képjavítás feltöltéskor<small>Lapkeresés, háttér levágása, perspektíva, papírfehérítés. Az eredeti fotó a lezárásig megmarad.</small></span></label>
       <label><input type="checkbox" data-opt="blurb" ${b.opts.blurb?"checked":""}><span>Fülszöveg az EPUB végére<small>A „Hátlap, fül” szerepű oldalak szövege külön fejezetben</small></span></label>
     </div>
-    ${isDone?"":`<div class="row"><button class="btn small" data-act="mk" data-kind="epub">EPUB most</button><button class="btn small" data-act="mk" data-kind="tpdf">Szöveges PDF</button><button class="btn small" data-act="mk" data-kind="txt">TXT</button></div>`}
+    ${isDone?"":`<div class="row"><button class="btn small" data-act="mk" data-kind="epub">EPUB most</button><button class="btn small" data-act="mk" data-kind="tpdf">Szöveges PDF</button><button class="btn small" data-act="mk" data-kind="txt">TXT</button><button class="btn small" data-act="mk" data-kind="md">Markdown</button></div>
+    ${allPages(b).some(p=>!p.enh)?`<div class="row"><button class="btn small" data-act="enhAll">Képjavítás a régi oldalakra</button><span class="note">A korábban feltöltött, még nem javított oldalakra.</span></div>`:""}`}
     <div class="danger-zone"><button class="btn small" data-act="backup">Biztonsági mentés (.zip)</button><button class="btn small danger" data-act="bookDel">Könyv törlése</button></div>
     <p class="note">A biztonsági mentés a képeket és a szöveget is tartalmazza. Félkész könyvet így vihetsz át másik telefonra.</p></div></details>
   </section>`;
@@ -382,7 +434,9 @@ function renderFinish(b){ const app=$("#app"); const np=pending(b); const sv=b.s
       <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end">${sv.pdf?`<span class="ck">✓ elmentve</span>`:""}<button class="btn primary small" data-act="save" data-kind="ipdf">Mentés / Drive</button><button class="btn ghost small" data-act="save" data-kind="ipdf" data-how="download">Letöltés</button></div></div>
     <div class="done-step${sv.epub?" ok":""}"><b class="num">2</b><div><b>EPUB</b><div class="sub">Kindle-re és ElevenReaderbe. Csak a szöveg, fejezetekkel és borítóval.</div></div>
       <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end">${sv.epub?`<span class="ck">✓ elmentve</span>`:""}<button class="btn primary small" data-act="save" data-kind="epub">Mentés / Drive</button><button class="btn ghost small" data-act="save" data-kind="epub" data-how="download">Letöltés</button></div></div>
-    <div class="done-step"><b class="num">3</b><div><b>Lezárás</b><div class="sub">A képek törlődnek a telefonról, a szöveg megmarad. Az EPUB később is újra elkészíthető, a képes PDF nem.</div></div>
+    <div class="done-step${sv.pkg?" ok":""}"><b class="num">3</b><div><b>Projektcsomag (.zip)</b><div class="sub">A javított oldalképek, a szöveg Markdownban és a beállítások. Visszatölthető, és belőle minden újra elkészíthető újrafotózás nélkül.</div><div class="sub" id="pkgProg"></div></div>
+      <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end">${sv.pkg?`<span class="ck">✓ elmentve</span>`:""}<button class="btn primary small" data-act="save" data-kind="pkg">Mentés / Drive</button><button class="btn ghost small" data-act="save" data-kind="pkg" data-how="download">Letöltés</button></div></div>
+    <div class="done-step"><b class="num">4</b><div><b>Lezárás</b><div class="sub">A fotók (az eredetiek is) törlődnek a telefonról, a szöveg megmarad. Az EPUB később is újra elkészíthető, a képes PDF a projektcsomagból.</div></div>
       <div><button class="btn small danger" data-act="finish">Képek törlése</button></div></div>
   </div>
   <p class="note">„Mentés / Drive”: megnyílik a telefon megosztás ablaka, ott válaszd a Google Drive-ot. Ha a telefon az adott fájltípust nem tudja megosztani, a Letöltések mappába kerül, onnan a Drive appban tudod feltölteni.</p>`; }
@@ -396,6 +450,7 @@ async function renderEditor(){ const root=$("#editorRoot"); const b=book(); if(!
       <span class="t">${esc(ch.title)} · <span class="mono">${i+1}/${ch.pages.length}</span></span>
       <span class="muted" style="font-size:13px">${b.cover===p.id?"borító":statusLabel(p)}${p.conf!=null&&b.cover!==p.id&&p.role!=="image"?` · <span class="mono">${p.conf}%</span>`:""}</span>
       ${b.cover===p.id?"":`<select id="edRole" class="rolesel" aria-label="Oldal szerepe">${Object.entries(ROLES).map(([k,v])=>`<option value="${k}" ${(p.role||"text")===k?"selected":""}>${v}</option>`).join("")}</select>`}</div>
+    ${p.warn&&u?`<div class="ed-warn">⚠ ${WARN_TEXT[p.warn]} <label class="btn small">📷 Újrafotózás<input type="file" accept="image/*" capture="environment" data-replace="${p.id}" hidden></label></div>`:""}
     <div class="ed-body${u?"":" noimg"}"><div class="ed-img"><img id="edImg" alt="Az oldal képe"></div>
       <div class="ed-text"><textarea id="edText" placeholder="${b.cover===p.id?"Ez a borító, a szövegét nem olvassa ki.":p.role==="image"?"Képes oldal: a PDF-ben benne van, az EPUB-ba képként kerül, felolvasásnál kimarad.":p.status==="done"?"Ezen az oldalon nem talált szöveget.":"Még nincs kiolvasva."}" spellcheck="true" lang="hu">${esc(p.text)}</textarea></div></div>
     <div class="ed-bottom">
@@ -403,16 +458,55 @@ async function renderEditor(){ const root=$("#editorRoot"); const b=book(); if(!
       <span class="sp"></span>
       <button class="btn small" data-act="edOcr" ${ocr.running||!u?"disabled":""}>${p.status==="done"?"Újraolvasás":"Kiolvasás"}</button>
       <button class="btn small" data-act="edRot" ${u?"":"disabled"}>Forgatás ↻</button>
+      <button class="btn small" data-act="edCorners" ${u&&!ocr.running?"":"disabled"}>Sarkok</button>
+      ${p.warn?"":`<label class="btn small ${u?"":"disabled"}">📷 Csere<input type="file" accept="image/*" capture="environment" data-replace="${p.id}" hidden ${u?"":"disabled"}></label>`}
       <button class="btn small" data-act="edLeft" ${i?"":"disabled"} aria-label="Előrébb sorolás">←</button><button class="btn small" data-act="edRight" ${i<ch.pages.length-1?"":"disabled"} aria-label="Hátrébb sorolás">→</button>
       <button class="btn small" data-act="edCover" ${u||b.cover===p.id?"":"disabled"}>${b.cover===p.id?"Borító ✓":"Borítónak"}</button>
       <button class="btn small danger" data-act="edDel">Törlés</button></div></div>`;
   if(u) $("#edImg").src=u; $("#edText").scrollTop=keepScroll;
   $("#edText").addEventListener("input",e=>{ p.text=e.target.value; p.edited=true; if(p.status!=="done"){p.status="done";p.conf=null;paintThumb(p);} save(b); }); }
 
+/* ---------- sarkok kézi igazítása ---------- */
+let CE=null; // {p, quad, w, h, url}
+async function openCorners(b,p){ let ob=await getImg(OID(p.id)); if(!ob){ ob=await getImg(p.id); if(!ob) return; await putImg(OID(p.id),ob); }
+  const bmp=await decode(ob); const w=bmp.width, h=bmp.height; if(bmp.close) bmp.close();
+  let quad=p.quad; if(!quad){ try{ const c=document.createElement("canvas"); const k=Math.min(1,1200/Math.max(w,h)); c.width=w*k; c.height=h*k; const bm=await decode(ob); c.getContext("2d").drawImage(bm,0,0,c.width,c.height); quad=KImage.findPage(c); }catch{} }
+  CE={p,quad:(quad||[[0,0],[1,0],[1,1],[0,1]]).map(q=>q.slice()),w,h,url:URL.createObjectURL(ob)}; renderCorners(); }
+function renderCorners(){ let root=$("#cornerRoot"); if(!CE){ if(root) root.remove(); return; }
+  if(!root){ root=document.createElement("div"); root.id="cornerRoot"; document.body.append(root); }
+  root.innerHTML=`<div class="corners" role="dialog" aria-modal="true" aria-label="Sarkok igazítása">
+    <div class="ed-top"><b class="t">Húzd a sarkokat a lap sarkaira</b></div>
+    <div class="cstage" id="cStage"><div class="cbox" id="cBox"><img src="${CE.url}" alt="Eredeti fotó" draggable="false"><svg viewBox="0 0 1 1" preserveAspectRatio="none"><polygon id="cPoly" vector-effect="non-scaling-stroke"/></svg>
+      ${CE.quad.map((_,i)=>`<span class="hd" data-h="${i}"></span>`).join("")}</div></div>
+    <div class="ed-bottom"><button class="btn small" data-act="cCancel">Mégse</button><span class="sp"></span>
+      <button class="btn small" data-act="cAuto">Automatikus</button><button class="btn small" data-act="cFull">Teljes kép</button><button class="btn small" data-act="cOrig">Eredeti fotó</button>
+      <button class="btn small primary" data-act="cApply">Alkalmaz</button></div></div>`;
+  const stage=$("#cStage"), box=$("#cBox"); const fit=()=>{ const k=Math.min((stage.clientWidth-48)/CE.w,(stage.clientHeight-48)/CE.h); box.style.width=CE.w*k+"px"; box.style.height=CE.h*k+"px"; paintCorners(); };
+  requestAnimationFrame(fit); addEventListener("resize",fit,{once:true});
+  root.querySelectorAll(".hd").forEach(hd=>{ hd.addEventListener("pointerdown",e=>{ e.preventDefault(); hd.setPointerCapture(e.pointerId); const i=+hd.dataset.h;
+    const move=ev=>{ const r=box.getBoundingClientRect(); CE.quad[i]=[Math.min(1,Math.max(0,(ev.clientX-r.left)/r.width)),Math.min(1,Math.max(0,(ev.clientY-r.top)/r.height))]; paintCorners(); };
+    const up=()=>{ hd.removeEventListener("pointermove",move); hd.removeEventListener("pointerup",up); hd.removeEventListener("pointercancel",up); };
+    hd.addEventListener("pointermove",move); hd.addEventListener("pointerup",up); hd.addEventListener("pointercancel",up); }); }); }
+function paintCorners(){ const poly=$("#cPoly"); if(!poly||!CE) return; poly.setAttribute("points",CE.quad.map(q=>q.join(",")).join(" "));
+  document.querySelectorAll("#cornerRoot .hd").forEach(hd=>{ const [x,y]=CE.quad[+hd.dataset.h]; hd.style.left=x*100+"%"; hd.style.top=y*100+"%"; }); }
+async function cornerAction(b,a){ if(!CE) return; const p=CE.p;
+  if(a==="cAuto"){ const c=document.createElement("canvas"); const bm=await decode(await getImg(OID(p.id))); const k=Math.min(1,1200/Math.max(CE.w,CE.h)); c.width=CE.w*k; c.height=CE.h*k; c.getContext("2d").drawImage(bm,0,0,c.width,c.height);
+    const q=KImage.findPage(c); if(q){ CE.quad=q; paintCorners(); } else toast("Nem találtam egyértelmű lapszélt; igazítsd kézzel."); return; }
+  if(a==="cFull"){ CE.quad=[[0,0],[1,0],[1,1],[0,1]]; paintCorners(); return; }
+  const url=CE.url, wasDone=p.status==="done";
+  if(a==="cApply"||a==="cOrig"){ busy(true); try{
+      if(a==="cOrig") await restoreOriginal(p);
+      else{ const full=CE.quad.every(([x,y],i)=>Math.abs(x-[0,1,1,0][i])<0.005&&Math.abs(y-[0,0,1,1][i])<0.005); await processPage(p,full?null:CE.quad); }
+      save(b,true); } finally{ busy(false); } }
+  CE=null; URL.revokeObjectURL(url); renderCorners(); await renderEditor(); render();
+  if((a==="cApply"||a==="cOrig")&&wasDone&&!p.edited&&await ask("Megváltozott az oldal képe. Kiolvassam újra?","Újraolvasás",false)) runOcr(b,[p.id]); }
+
 /* ---------- események ---------- */
 document.addEventListener("submit",e=>{ if(e.target.id!=="newBook") return; e.preventDefault();
   const b=newBook($("#nbTitle").value.trim(),$("#nbAuthor").value.trim()); S.books.push(b); save(b,true); S.cur=b.id; S.view="book"; render(); scrollTo(0,0); });
-document.addEventListener("keydown",e=>{ if(e.key==="Enter"&&e.target.matches(".book")) e.target.click(); if(e.key==="Escape"&&S.edit){S.edit=null;renderEditor();render();} });
+document.addEventListener("keydown",e=>{ if(e.key==="Enter"&&e.target.matches(".book")) e.target.click();
+  if(e.key==="Escape"&&CE){ const u=CE.url; CE=null; URL.revokeObjectURL(u); renderCorners(); return; }
+  if(e.key==="Escape"&&S.edit){S.edit=null;renderEditor();render();} });
 document.addEventListener("input",e=>{ const b=book(); if(!b) return; const t=e.target;
   if(t.id==="bTitle"){b.title=t.value;save(b);} else if(t.id==="bAuthor"){b.author=t.value;save(b);}
   else if(t.dataset.chtitle){ const c=b.chapters.find(c=>c.id===t.dataset.chtitle); if(c){c.title=t.value;save(b);} } });
@@ -420,6 +514,7 @@ document.addEventListener("change",async e=>{ const t=e.target; const b=book();
   if(t.id==="importZip"&&t.files[0]){ try{ const nb=await importBackup(t.files[0]); S.cur=nb.id; S.view="book"; render(); toast("Betöltve: "+nb.title);}catch{ toast("Ez nem Kötészet-mentés, vagy sérült a fájl."); } t.value=""; return; }
   if(!b) return;
   if(t.dataset.add&&t.files&&t.files.length){ const files=[...t.files]; t.value=""; await addFiles(b,t.dataset.add,files); }
+  if(t.dataset.replace&&t.files&&t.files[0]){ const p=allPages(b).find(x=>x.id===t.dataset.replace), f=t.files[0]; t.value=""; if(p){ await replacePhoto(b,p,f); renderEditor(); render(); } }
   if(t.dataset.opt){ b.opts[t.dataset.opt]=t.checked; save(b); }
   if(t.id==="edRole"&&S.edit){ const p=allPages(b).find(x=>x.id===S.edit.pageId); if(p){ p.role=t.value; p.roleManual=true; save(b); paintThumb(p); renderEditor(); } } });
 
@@ -427,6 +522,8 @@ async function makeFile(b,kind,onProg){ const base=fileBase(b);
   if(kind==="epub") return {name:base+".epub",blob:await buildEpub(b)};
   if(kind==="tpdf") return {name:base+" (szöveg).pdf",blob:await buildTextPdf(b)};
   if(kind==="txt") return {name:base+".txt",blob:buildTxt(b)};
+  if(kind==="md") return {name:base+".md",blob:new Blob([buildMd(b)],{type:"text/markdown"})};
+  if(kind==="pkg"){ const r=await buildPackage(b,onProg); return {name:base+" - projektcsomag.zip",blob:r.blob,missing:r.missing}; }
   if(kind==="ipdf"){ const r=await buildImagePdf(b,onProg); return {name:base+".pdf",blob:r.blob,missing:r.missing}; } }
 
 document.addEventListener("click",async e=>{ const el=e.target.closest("[data-act]"); if(!el) return; const a=el.dataset.act; const b=book();
@@ -449,39 +546,46 @@ document.addEventListener("click",async e=>{ const el=e.target.closest("[data-ac
   case "chUp": case "chDown": { const i=b.chapters.findIndex(c=>c.id===el.dataset.id); swap(b.chapters,i,a==="chUp"?i-1:i+1); save(b,true); render(); break; }
   case "chDel": { const c=b.chapters.find(c=>c.id===el.dataset.id); if(!c) break;
     if(!await ask(`Törlöd a „${c.title}” fejezetet és ${c.pages.length} oldalát?`,"Törlés")) break;
-    for(const p of c.pages){ await delImg(p.id); if(b.cover===p.id) b.cover=null; } b.chapters=b.chapters.filter(x=>x!==c);
+    for(const p of c.pages){ await delPage(p); if(b.cover===p.id) b.cover=null; } b.chapters=b.chapters.filter(x=>x!==c);
     if(!b.chapters.length) b.chapters.push({id:uid(),title:"1. fejezet",pages:[]}); save(b,true); render(); break; }
   case "bookDel": if(!await ask(`Véglegesen törlöd a „${b.title}” könyvet a képeivel és a szövegével együtt?`,"Törlés")) break;
-    for(const p of allPages(b)) await delImg(p.id); await delBookRec(b.id); S.books=S.books.filter(x=>x!==b); S.cur=null; render(); toast("A könyv törölve."); break;
+    for(const p of allPages(b)) await delPage(p); await delBookRec(b.id); S.books=S.books.filter(x=>x!==b); S.cur=null; render(); toast("A könyv törölve."); break;
   case "mk": case "save": { const kind=el.dataset.kind;
-    if(kind!=="ipdf"&&!bookContent(b).length){ toast("Még nincs kiolvasott szöveg. Előbb nyomd meg a Kiolvasás gombot."); break; }
+    if(kind!=="ipdf"&&kind!=="pkg"&&!bookContent(b).length){ toast("Még nincs kiolvasott szöveg. Előbb nyomd meg a Kiolvasás gombot."); break; }
     el.disabled=true; const old=el.textContent; el.textContent="Készül…"; busy(true);
-    try{ const prog=(i,n)=>{ const pp=$("#pdfProg"); if(pp) pp.textContent=`${i+1}/${n}. oldal…`; };
-      const f=await makeFile(b,kind,prog); const pp=$("#pdfProg"); if(pp) pp.textContent="";
+    try{ const pid=kind==="pkg"?"#pkgProg":"#pdfProg"; const prog=(i,n)=>{ const pp=$(pid); if(pp) pp.textContent=`${i+1}/${n}. oldal…`; };
+      const f=await makeFile(b,kind,prog); const pp=$(pid); if(pp) pp.textContent="";
       const r=await deliver(f.name,f.blob,el.dataset.how); toast(deliveredMsg(r,f.name)+(f.missing?` (${f.missing} oldal képe hiányzott)`:""),6000);
-      if(a==="save"&&r!=="cancel"){ b.saved=b.saved||{}; b.saved[kind==="ipdf"?"pdf":"epub"]=true; save(b,true); render(); } }
+      if(a==="save"&&r!=="cancel"){ b.saved=b.saved||{}; b.saved[{ipdf:"pdf",epub:"epub",pkg:"pkg"}[kind]||kind]=true; save(b,true); render(); } }
     catch(err){ console.error(err); toast(err&&err.message&&err.message!=="empty"?err.message:"Nem sikerült elkészíteni a fájlt.",6000); }
     finally{ busy(false); el.disabled=false; el.textContent=old; } break; }
-  case "finish": { const sv=b.saved||{};
-    const msg=!sv.pdf?"A képes PDF-et még nem mentetted el. Ha most törlöd a képeket, a képes változat elveszik, csak a szöveg marad meg. Biztosan törlöd?":"Törlöd a képeket a telefonról? A szöveg megmarad, az EPUB később is elkészíthető.";
+  case "finish": { const sv=b.saved||{}; const miss=[!sv.pdf&&"a képes PDF-et",!sv.pkg&&"a projektcsomagot"].filter(Boolean);
+    const msg=miss.length?`Még nem mentetted el ${miss.join(" és ")}. Ha most törlöd a képeket, ${!sv.pkg?"újrafotózás nélkül nem tudod újra elkészíteni a képes változatot":"a képes PDF elveszik"}. Biztosan törlöd?`:"Törlöd a képeket a telefonról? A szöveg megmarad, az EPUB később is elkészíthető, a projektcsomagból pedig minden.";
     if(!await ask(msg,"Képek törlése")) break;
     const cb=await coverBlob(b); if(cb&&!b.coverData){ try{ b.coverData=await blobToDataUrl((await scaleTo(cb,900,0.8)).blob); }catch{} }
-    let n=0; for(const p of allPages(b)){ if(await getImg(p.id)){ await delImg(p.id); n++; } }
+    let n=0; for(const p of allPages(b)){ if(await getImg(p.id)){ n++; } await delPage(p); }
     b.status="done"; save(b,true); S.view="book"; render(); toast(`Lezárva. ${n} kép törölve, a szöveg megmaradt.`); break; }
   case "backup": el.disabled=true; busy(true); try{ const r=await deliver(`${fileBase(b)} - koteszet mentes.zip`,await buildBackup(b)); toast(deliveredMsg(r,"biztonsági mentés")); } finally{ busy(false); el.disabled=false; } break;
   case "edit": S.edit={chId:el.dataset.ch,pageId:el.dataset.page}; renderEditor(); break;
+  case "enhAll": { const list=[]; for(const p of allPages(b)) if(!p.enh&&await getImg(p.id)) list.push(p);
+    if(!list.length){ toast("Nincs javítatlan oldal."); break; }
+    if(!await ask(`Lefuttatom a képjavítást ${list.length} oldalon? Az eredeti fotók a lezárásig megmaradnak, oldalanként visszaállíthatók. A javított oldalakat utána érdemes újraolvasni.`,"Javítás",false)) break;
+    busy(true); try{ for(let i=0;i<list.length;i++){ toast(`${i+1}/${list.length}. oldal javítása…`,60000); try{ await processPage(list[i]); }catch(e){ console.warn(e); } paintThumb(list[i]); } }
+    finally{ busy(false); } save(b,true); render(); toast("Kész. Most a „Minden oldal újraolvasása” gombbal frissítheted a szöveget.",7000); break; }
+  case "cApply": case "cAuto": case "cFull": case "cOrig": case "cCancel": await cornerAction(b,a); break;
   case "edClose": S.edit=null; renderEditor(); render(); break;
-  case "edPrev": case "edNext": case "edLeft": case "edRight": case "edDel": case "edOcr": case "edRot": case "edCover": {
+  case "edPrev": case "edNext": case "edLeft": case "edRight": case "edDel": case "edOcr": case "edRot": case "edCover": case "edCorners": {
     const ch=b.chapters.find(c=>c.id===S.edit.chId); const i=ch.pages.findIndex(p=>p.id===S.edit.pageId); const p=ch.pages[i];
     if(a==="edPrev"&&i>0) S.edit.pageId=ch.pages[i-1].id;
     if(a==="edNext"&&i<ch.pages.length-1) S.edit.pageId=ch.pages[i+1].id;
     if(a==="edLeft"&&i>0){swap(ch.pages,i,i-1); save(b);}
     if(a==="edRight"&&i<ch.pages.length-1){swap(ch.pages,i,i+1); save(b);}
     if(a==="edCover"){ b.cover=b.cover===p.id?null:p.id; b.coverData=null; save(b); }
-    if(a==="edRot"){ el.disabled=true; const d=await rotateImage(p.id); p.w=d.w; p.h=d.h; p.lines=null; save(b);
+    if(a==="edCorners"){ await openCorners(b,p); break; }
+    if(a==="edRot"){ el.disabled=true; const d=await rotatePage(p); if(d){ p.w=d.w; p.h=d.h; } p.lines=null; save(b);
       if(p.status==="done"&&await ask("Elforgattad a képet. Kiolvassam újra az oldalt?","Újraolvasás",false)) runOcr(b,[p.id]); }
     if(a==="edOcr"){ runOcr(b,[p.id]); }
-    if(a==="edDel"){ if(!await ask("Törlöd ezt az oldalt?","Törlés")) break; await delImg(p.id); if(b.cover===p.id) b.cover=null; ch.pages.splice(i,1); save(b,true);
+    if(a==="edDel"){ if(!await ask("Törlöd ezt az oldalt?","Törlés")) break; await delPage(p); if(b.cover===p.id) b.cover=null; ch.pages.splice(i,1); save(b,true);
       if(!ch.pages.length){S.edit=null; renderEditor(); render(); break;} S.edit.pageId=ch.pages[Math.min(i,ch.pages.length-1)].id; }
     renderEditor(); render(); break; }
   } }catch(err){ console.error(err); toast("Valami nem sikerült: "+(err&&err.message||"ismeretlen hiba"),7000); } });
