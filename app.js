@@ -390,6 +390,7 @@ function render(){ const app=$("#app"); const b=book();
     ${mine?`<div class="progress"><i id="ocrBar"></i></div><div class="note" id="ocrText">Indítás…</div>`:`<p class="note">Oldalanként néhány másodperc. Amíg fut, a képernyő ébren marad. A kész oldalak azonnal mentődnek, így bármikor abbahagyhatod.</p>`}
     <div class="legend"><span><i class="st"></i>vár</span><span><i class="st done"></i>kész</span><span><i class="st low"></i>bizonytalan, nézd át</span><span><i class="st error"></i>hiba</span><span><i class="st img"></i>csak kép</span></div>
   </section>`}
+  ${!isDone&&!mine&&allPages(b).some(p=>!p.enh&&!p.edited)&&b.opts.enhance?`<div class="banner"><span>Néhány oldal még a képjavítás előtt került fel (szőnyeg, ferde lap). Javítsam ki őket? Utána a „Minden oldal újraolvasása” frissíti a szöveget.</span><button class="btn small primary" data-act="enhAll">Képjavítás</button></div>`:""}
   ${b.chapters.map((c,ci)=>`<section class="chap" data-ch="${c.id}">
     <div class="chap-head"><input value="${esc(c.title)}" data-chtitle="${c.id}" aria-label="Fejezet címe"><span class="muted mono" style="font-size:13px">${c.pages.length} old.</span>
       <button class="btn ghost small" data-act="chUp" data-id="${c.id}" ${ci?"":"disabled"} aria-label="Fejezet feljebb">↑</button>

@@ -75,7 +75,8 @@ function findPage(src,dbg){ const {c}=drawScaled(src,360), w=c.width, h=c.height
   // az egyenest kifelé toljuk, hogy a lap ívelt széle (a gerinc felé) se vágódjon le
   const outer=(pts,f,side)=>{ if(!f) return null; const n=pts.length, P=pts.slice(Math.floor(n*0.05),Math.ceil(n*0.95));
     const r=P.map(([t,v])=>v-(f[0]*t+f[1])).sort((x,y)=>x-y); const q=side<0?r[Math.floor(r.length*0.04)]:r[Math.floor(r.length*0.96)];
-    const lim=0.03*(side<0||side>0?Math.max(w,h):0); return [f[0],f[1]+clamp(q,-lim,lim)]; };
+    // legfeljebb ~1,5 képpont: a szőnyeg ne maradjon a szélén
+    const lim=0.004*Math.max(w,h); return [f[0],f[1]+clamp(q,-lim,lim)]; };
   const fl=outer(L,fit(L),-1), fr=outer(R,fit(R),1), ft=outer(T,fit(T),-1), fb=outer(B,fit(B),1); if(!fl||!fr||!ft||!fb) return null;
   // x = al*y + bl  és  y = at*x + bt metszése
   const cross=([ax,bx],[ay,by])=>{ const y=(ay*bx+by)/(1-ay*ax); return [ax*y+bx,y]; };
